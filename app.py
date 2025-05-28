@@ -132,7 +132,7 @@ def set_seed(seed):
 # Text to Image function with thinking option and hyperparameters
 def text_to_image(prompt, show_thinking=False, cfg_text_scale=4.0, cfg_interval=0.4, 
                  timestep_shift=3.0, num_timesteps=50, 
-                 cfg_renorm_min=1.0, cfg_renorm_type="global", 
+                 cfg_renorm_min=0.0, cfg_renorm_type="global", 
                  max_think_token_n=1024, do_sample=False, text_temperature=0.3,
                  seed=0, image_ratio="1:1"):
     # Set seed for reproducibility
@@ -195,7 +195,7 @@ def image_understanding(image: Image.Image, prompt: str, show_thinking=False,
 # Image Editing function with thinking option and hyperparameters
 def edit_image(image: Image.Image, prompt: str, show_thinking=False, cfg_text_scale=4.0, 
               cfg_img_scale=2.0, cfg_interval=0.0, 
-              timestep_shift=3.0, num_timesteps=50, cfg_renorm_min=1.0, 
+              timestep_shift=3.0, num_timesteps=50, cfg_renorm_min=0.0, 
               cfg_renorm_type="text_channel", max_think_token_n=1024, 
               do_sample=False, text_temperature=0.3, seed=0):
     # Set seed for reproducibility
