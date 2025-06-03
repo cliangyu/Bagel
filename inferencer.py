@@ -237,11 +237,13 @@ class InterleaveInferencer:
                 cfg_img_context = self.update_context_text(system_prompt, cfg_img_context)
 
             for input_term in input_lists:
+                # Updates context with input prompts
                 if isinstance(input_term, str):
                     cfg_text_context = deepcopy(gen_context)
                     gen_context = self.update_context_text(input_term, gen_context)
                     cfg_img_context = self.update_context_text(input_term, cfg_img_context)
 
+                # Updates context with input images
                 elif isinstance(input_term, Image.Image):
                     input_term = self.vae_transform.resize_transform(pil_img2rgb(input_term))
                     gen_context = self.update_context_image(input_term, gen_context, vae=not understanding_output)
@@ -299,11 +301,15 @@ class InterleaveInferencer:
         if text is not None:
             input_list.append(text)
 
-        output_list = self.interleave_inference(input_list, **kargs)
+        output_list = self.interleave_inference(
+            input_lists=input_list, 
+            **kargs
+        )
 
         for i in output_list:
             if isinstance(i, Image.Image):
                 output_dict['image'] = i
             elif isinstance(i, str):
                 output_dict['text'] = i
+        
         return output_dict
