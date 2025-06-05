@@ -208,7 +208,6 @@ class InterleaveInferencer:
         input_lists: List[Union[str, Image.Image]],
         think=False,
         understanding_output=False,
-
         max_think_token_n=1000,
         do_sample=False,
         text_temperature=0.3,

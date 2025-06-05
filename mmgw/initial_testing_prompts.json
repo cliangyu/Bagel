@@ -1,0 +1,36 @@
+{
+    "relative positions": [
+        "An orange cat sitting in front of a coffee cup on a table",
+        "A cat on top of a bird",
+        "A gnome behind a hut", 
+        "A tropical cocktail on the left of flip-flops on a beach",
+        "A dog lying down to the right of some socks"
+    ],
+    "object orientation": [
+        "A motorcycle lying down",
+        "An upside down water bottle",
+        "A bell pepper laying on its side",
+        "A spider flipped over"
+    ],
+    "text": [
+        "A highway sign showing 60 MPH",
+        "A digital alarm clock showing 6am",
+        "A comic book character saying hello",
+        "A magazine cover with the title: Home Interiors",
+        "A book cover with the title: \"Animals\""
+    ],
+    "cardinality": [
+        "4 peaches in a fruit basket", 
+        "5 birds sitting on a power line",
+        "A field with 5 deer grazing",
+        "A tray of 6 cookies"
+    ],
+    "structural characteristics": [
+        "Fresh fruits all cut in half",
+        "A piece of paper folded in half",
+        "A bent knife",
+        "A car with a dented door",
+        "A deflated tire",
+        "A butterfly with its wings closed"
+    ]
+}
