@@ -108,9 +108,8 @@ for gpu_device_i in range(len(gpu_devices)):
 print(f"{len(gpu_devices)} models loaded")
 
 
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
+# seed = 42
+seed = np.random.randint(0, 1000000)
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
@@ -165,7 +164,10 @@ t2i_think_params =dict(
 with open('/home/jiahuikchen/BAGEL/mmgw/mmgw.json', 'r') as f:
     data = json.load(f)
 # category = "relative_positions"
-category = "text"
+# category = "text"
+# category = "object_orientations"
+category = "cardinality"
+# category = "structural_characteristics"
 prompts = data[category]
 
 # Create an output directory for the generated images
