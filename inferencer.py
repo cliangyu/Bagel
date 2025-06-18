@@ -27,6 +27,8 @@ class InterleaveInferencer:
         self.vae_transform = vae_transform
         self.vit_transform = vit_transform
         self.new_token_ids = new_token_ids
+        self.device = next(self.model.parameters()).device
+        self.dtype = next(self.model.parameters()).dtype
         
     def init_gen_context(self): 
         gen_context = {
@@ -50,6 +52,11 @@ class InterleaveInferencer:
             tokenizer=self.tokenizer, 
             new_token_ids=self.new_token_ids,
         )
+        # Move all tensors to the correct device and dtype
+        generation_input = {
+            key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
+            for key, tensor in generation_input.items()
+        }
 
         past_key_values = self.model.forward_cache_update_text(past_key_values, **generation_input)        
         gen_context['kv_lens'] = kv_lens
@@ -76,6 +83,15 @@ class InterleaveInferencer:
                 transforms=self.vae_transform, 
                 new_token_ids=self.new_token_ids,
             )
+            # Move all tensors to the correct device and dtype
+            # patchified_vae_latent_shapes item is a list of tuples
+            generation_input = {
+                key: (
+                    value if isinstance(value, list) 
+                    else value.to(device=self.device, dtype=self.dtype if value.dtype.is_floating_point else value.dtype)
+                )
+                for key, value in generation_input.items()
+            }
             past_key_values = self.model.forward_cache_update_vae(self.vae_model, past_key_values, **generation_input)
         
         if vit:
@@ -87,6 +103,11 @@ class InterleaveInferencer:
                 transforms=self.vit_transform, 
                 new_token_ids=self.new_token_ids,
             )
+            # Move all tensors to the correct device and dtype
+            generation_input = {
+                key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
+                for key, tensor in generation_input.items()
+            }
             past_key_values = self.model.forward_cache_update_vit(past_key_values, **generation_input)
 
         gen_context['kv_lens'] = kv_lens
@@ -112,7 +133,6 @@ class InterleaveInferencer:
         num_timesteps=50, 
         timestep_shift=3.0
     ):
-        # print(cfg_renorm_type)
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
         ropes = gen_context['ropes']
@@ -122,6 +142,11 @@ class InterleaveInferencer:
             image_sizes=[image_shape], 
             new_token_ids=self.new_token_ids,
         ) 
+        # Move all tensors to the correct device and dtype
+        generation_input = {
+            key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
+            for key, tensor in generation_input.items()
+        }
         
         # text cfg
         cfg_text_past_key_values = cfg_text_precontext['past_key_values']
@@ -132,6 +157,10 @@ class InterleaveInferencer:
             curr_rope=ropes_cfg, 
             image_sizes=[image_shape], 
         )
+        generation_input_cfg_text = {
+            key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
+            for key, tensor in generation_input_cfg_text.items()
+        }
 
         # img cfg
         cfg_img_past_key_values = cfg_img_precontext['past_key_values']
@@ -142,6 +171,10 @@ class InterleaveInferencer:
             curr_rope=ropes_cfg, 
             image_sizes=[image_shape], 
         )
+        generation_input_cfg_img = {
+            key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
+            for key, tensor in generation_input_cfg_img.items()
+        }
 
         unpacked_latent = self.model.generate_image(
             past_key_values=past_key_values,
@@ -176,6 +209,16 @@ class InterleaveInferencer:
         latent = latent.reshape(1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel)
         latent = torch.einsum("nhwpqc->nchpwq", latent)
         latent = latent.reshape(1, self.model.latent_channel, h * self.model.latent_patch_size, w * self.model.latent_patch_size)
+        # # DEBUG
+        # print(f"BAGEL model device: {next(self.model.parameters()).device}")
+        # print(f"BAGEL model dtype: {next(self.model.parameters()).dtype}")
+        # print(f"BAGEL's OUTPUT device: {latent.device}")
+        # print(f"BAGEL's OUTPUT dtype: {latent.dtype}")
+        # print(f"VAE model device: {next(self.vae_model.parameters()).device}")
+        # print(f"VAE model dtype: {next(self.vae_model.parameters()).dtype}")
+        # next(vae_model.parameters()).dtype
+        # device = next(self.vae_model.parameters()).device
+        # latent = latent.to(device=device, dtype=torch.bfloat16)
         image = self.vae_model.decode(latent)
         image = (image * 0.5 + 0.5).clamp(0, 1)[0].permute(1, 2, 0) * 255
         image = Image.fromarray((image).to(torch.uint8).cpu().numpy())
@@ -198,6 +241,11 @@ class InterleaveInferencer:
             end_token_id=self.new_token_ids['eos_token_id'],
             **generation_input,
         )
+        # Move all tensors to the correct device and dtype
+        generation_input = {
+            key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
+            for key, tensor in generation_input.items()
+        }
         output = self.tokenizer.decode(unpacked_latent[:,0])
         # print(f"Full decoded output: \n\t{output}")
         # breakpoint()
