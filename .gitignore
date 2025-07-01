@@ -8,3 +8,18 @@ eval_results
 tests
 .DS_Store
 gradio.sh
+
+# Chain of Thought outputs
+cot_output_*
+cot_demo_records_*
+real_cot_*
+comparison_*
+complex_test_*
+complete_cot_demo_*
+cot_no_accumulative_*
+
+# Claude specific
+.claude/
+
+# Model files (if not needed in repo)
+BAGEL-7B-MoT/
