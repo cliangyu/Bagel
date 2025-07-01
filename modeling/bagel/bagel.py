@@ -20,6 +20,8 @@ from data.data_utils import (
 from .qwen2_navit import NaiveCache
 from .modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
 
+from tqdm import tqdm
+
 
 class BagelConfig(PretrainedConfig):
     def __init__(
@@ -387,6 +389,8 @@ class Bagel(PreTrainedModel):
         packed_vit_token_embed = self.connector(packed_vit_token_embed)
         pos_emb = self.vit_pos_embed(packed_vit_position_ids)
         packed_vit_token_embed = packed_vit_token_embed + pos_emb
+        if packed_vit_token_embed.dtype != packed_sequence.dtype:
+            packed_vit_token_embed = packed_vit_token_embed.to(packed_sequence.dtype)
         packed_sequence[packed_vit_token_indexes] = packed_vit_token_embed
 
         extra_inputs = {}
@@ -516,6 +520,8 @@ class Bagel(PreTrainedModel):
         packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
         packed_timestep_embeds = self.time_embedder(packed_timesteps)
         packed_latent = self.vae2llm(packed_latent) + packed_timestep_embeds + packed_pos_embed
+        if packed_latent.dtype != packed_sequence.dtype:
+            packed_latent = packed_latent.to(packed_sequence.dtype)
         packed_sequence[packed_vae_token_indexes] = packed_latent
 
         extra_inputs = {}
@@ -675,7 +681,7 @@ class Bagel(PreTrainedModel):
         dts =  timesteps[:-1] - timesteps[1:]
         timesteps = timesteps[:-1]
 
-        for i, t in enumerate(timesteps):
+        for i, t in tqdm(enumerate(timesteps), total=len(timesteps)):
 
             timestep = torch.tensor([t] * x_t.shape[0], device=x_t.device)
             if t > cfg_interval[0] and t <= cfg_interval[1]:
@@ -762,6 +768,8 @@ class Bagel(PreTrainedModel):
         packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
         packed_timestep_embeds = self.time_embedder(timestep)
         x_t = self.vae2llm(x_t) + packed_timestep_embeds + packed_pos_embed
+        if x_t.dtype != packed_sequence.dtype:
+            x_t = x_t.to(packed_sequence.dtype)
         packed_sequence[packed_vae_token_indexes] = x_t
 
         extra_inputs = {}

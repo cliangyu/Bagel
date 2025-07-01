@@ -5,6 +5,7 @@ set -x
 
 GPUS=8
 
+
 # generate images
 torchrun \
     --nnodes=1 \
@@ -31,10 +32,10 @@ torchrun \
     --master_addr=127.0.0.1 \
     --master_port=12345 \
     ./eval/gen/geneval/evaluation/evaluate_images_mp.py \
-    $OUTPUT_DIR/images \
-    --outfile $OUTPUT_DIR/results.jsonl \
+    $output_path/images \
+    --outfile $output_path/results.jsonl \
     --model-path ./eval/gen/geneval/model
 
 
 # summarize score
-python ./eval/gen/geneval/evaluation/summary_scores.py $OUTPUT_DIR/results.jsonl
+python ./eval/gen/geneval/evaluation/summary_scores.py $output_path/results.jsonl
