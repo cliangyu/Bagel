@@ -8,6 +8,7 @@ from safetensors.torch import load_file
 
 import torch
 import torch.distributed as dist
+from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
 from data.data_utils import add_special_tokens
 from modeling.bagel import (
     BagelConfig, Bagel, Qwen2Config, Qwen2ForCausalLM, SiglipVisionConfig, SiglipVisionModel
@@ -28,11 +29,16 @@ def move_generation_input_to_device(generation_input, device):
 
 
 def setup_distributed():
-    dist.init_process_group(backend="nccl")
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    if "RANK" in os.environ:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        return True
+    else:
+        # Single process mode
+        return False
 
 
-def generate_image(prompt, num_timesteps=50, cfg_scale=10.0, cfg_interval=[0, 1.0], cfg_renorm_min=0., timestep_shift=1.0, num_images=4, resolution=512, device=None):  # 添加device参数
+def generate_image(prompt, num_timesteps=50, cfg_scale=10.0, cfg_interval=[0, 1.0], cfg_renorm_min=0., timestep_shift=1.0, num_images=4, resolution=512, device=None, is_distributed=False):
     past_key_values = NaiveCache(gen_model.config.llm_config.num_hidden_layers)
     newlens = [0] * num_images
     new_rope = [0] * num_images
@@ -44,7 +50,13 @@ def generate_image(prompt, num_timesteps=50, cfg_scale=10.0, cfg_interval=[0, 1.
         tokenizer=tokenizer, 
         new_token_ids=new_token_ids,
     )
-    generation_input = move_generation_input_to_device(generation_input, device)
+    # Move inputs to the appropriate device
+    if is_distributed:
+        # In distributed mode, move to this rank's device
+        generation_input = move_generation_input_to_device(generation_input, device)
+    else:
+        # In model parallel mode, move to first GPU (model handles the rest)
+        generation_input = move_generation_input_to_device(generation_input, "cuda:0")
 
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=True, dtype=torch.float16):
@@ -124,10 +136,15 @@ if __name__ == "__main__":
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    setup_distributed()
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    device = f"cuda:{rank}"
+    is_distributed = setup_distributed()
+    if is_distributed:
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device = f"cuda:{rank}"
+    else:
+        rank = 0
+        world_size = 1
+        device = "cuda:0"
     
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
@@ -156,23 +173,82 @@ if __name__ == "__main__":
         latent_patch_size=2,
         max_latent_size=args.max_latent_size,
     )
-    language_model = Qwen2ForCausalLM(llm_config)
-    vit_model = SiglipVisionModel(vit_config)
-    model = Bagel(language_model, vit_model, config)
-    model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config)
+    
+    # Use init_empty_weights for memory-efficient loading
+    with init_empty_weights():
+        language_model = Qwen2ForCausalLM(llm_config)
+        vit_model = SiglipVisionModel(vit_config)
+        model = Bagel(language_model, vit_model, config)
+        model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
 
     tokenizer = Qwen2Tokenizer.from_pretrained(args.model_path)
     tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
+    
+    if is_distributed:
+        # Data parallelism: each rank loads full model on its GPU
+        if rank == 0:
+            print(f"Loading full model on GPU {rank} for data parallelism")
+        
+        model = load_checkpoint_and_dispatch(
+            model,
+            checkpoint=os.path.join(args.model_path, "ema.safetensors"),
+            device_map={"": device},  # Load entire model on this rank's GPU
+            offload_buffers=False,
+            dtype=torch.bfloat16,
+            force_hooks=False,
+        )
+    else:
+        # Model parallelism: split model across GPUs
+        max_mem_per_gpu = "80GiB"
+        device_map = infer_auto_device_map(
+            model,
+            max_memory={i: max_mem_per_gpu for i in range(torch.cuda.device_count())},
+            no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
+        )
+        
+        # Ensure certain modules stay on the same device
+        same_device_modules = [
+            'language_model.model.embed_tokens',
+            'time_embedder',
+            'latent_pos_embed',
+            'vae2llm',
+            'llm2vae',
+            'connector',
+            'vit_pos_embed'
+        ]
+        
+        if torch.cuda.device_count() == 1:
+            first_device = device_map.get(same_device_modules[0], "cuda:0")
+            for k in same_device_modules:
+                if k in device_map:
+                    device_map[k] = first_device
+                else:
+                    device_map[k] = "cuda:0"
+        else:
+            first_device = device_map.get(same_device_modules[0])
+            for k in same_device_modules:
+                if k in device_map:
+                    device_map[k] = first_device
+        
+        if rank == 0:
+            print("Device map:", device_map)
 
-    model_state_dict_path = os.path.join(args.model_path, "ema.safetensors")
-    model_state_dict = load_file(model_state_dict_path, device="cpu")
-    msg = model.load_state_dict(model_state_dict, strict=False)
-    if rank == 0:
-        print(msg)
-    del model_state_dict
+        # Load with checkpoint dispatch for model parallelism
+        model = load_checkpoint_and_dispatch(
+            model,
+            checkpoint=os.path.join(args.model_path, "ema.safetensors"),
+            device_map=device_map,
+            offload_buffers=True,
+            dtype=torch.bfloat16,
+            force_hooks=True,
+            offload_folder="/tmp/offload"
+        )
 
-    model = model.to(device).eval()
-    vae_model = vae_model.to(device).eval()
+    model = model.eval()
+    if is_distributed:
+        vae_model = vae_model.to(device).eval()
+    else:
+        vae_model = vae_model.to("cuda:0").eval()  # In model parallel, VAE goes to first GPU
     gen_model = model
 
     cfg_scale = args.cfg_scale
@@ -185,10 +261,15 @@ if __name__ == "__main__":
         metadatas = [json.loads(line) for line in fp]
     total_metadatas = len(metadatas)
     
-    prompts_per_gpu = (total_metadatas + world_size - 1) // world_size
-    start = rank * prompts_per_gpu
-    end = min(start + prompts_per_gpu, total_metadatas)
-    print(f"GPU {rank}: Processing {end - start} prompts (indices {start} to {end - 1})")
+    if is_distributed:
+        prompts_per_gpu = (total_metadatas + world_size - 1) // world_size
+        start = rank * prompts_per_gpu
+        end = min(start + prompts_per_gpu, total_metadatas)
+        print(f"GPU {rank}: Processing {end - start} prompts (indices {start} to {end - 1})")
+    else:
+        start = 0
+        end = total_metadatas
+        print(f"Single process: Processing {end - start} prompts (indices {start} to {end - 1})")
 
     for idx in range(start, end):
         metadata = metadatas[idx]
@@ -225,6 +306,7 @@ if __name__ == "__main__":
                 num_images=args.batch_size,
                 resolution=args.resolution,
                 device=device,
+                is_distributed=is_distributed,
             )
             image_list.extend(tmp_image_list)
 

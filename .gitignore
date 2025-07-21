@@ -18,6 +18,9 @@ complex_test_*
 complete_cot_demo_*
 cot_no_accumulative_*
 
+# Evaluation outputs
+outputs/
+
 # Claude specific
 .claude/
 

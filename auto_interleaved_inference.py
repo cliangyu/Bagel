@@ -113,7 +113,7 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
                     for token_idx in range(max_text_length):
                         # Generate next token
                         try:
-                            next_token = self._generate_next_token(
+                            next_token, current_gen_context = self._generate_next_token(
                                 current_gen_context,
                                 do_sample=do_sample,
                                 temperature=text_temperature
@@ -126,82 +126,98 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
                             logger.warning("Received None token, ending generation")
                             break
                         
-                    token_id = next_token.item()
-                    
-                    # Check for special tokens
-                    if token_id == self.eos_token_id:
-                        # End of sequence
-                        if text_tokens:
-                            decoded_text = self.tokenizer.decode(text_tokens)
-                            output_list.append(decoded_text)
-                        return output_list
-                    
-                    elif token_id == self.vision_start_token_id:
-                        # Switch to image generation
-                        # First, decode and save any accumulated text
-                        if text_tokens:
-                            decoded_text = self.tokenizer.decode(text_tokens)
-                            output_list.append(decoded_text)
-                            # Update main context with the generated text
-                            gen_context = self.update_context_text(decoded_text, gen_context)
-                            cfg_img_context = self.update_context_text(decoded_text, cfg_img_context)
+                        token_id = next_token.item()
                         
-                        # Add vision start token to context
-                        vision_start_text = self.tokenizer.decode([token_id])
-                        gen_context = self.update_context_text(vision_start_text, gen_context)
-                        cfg_img_context = self.update_context_text(vision_start_text, cfg_img_context)
-                        cfg_text_context = deepcopy(gen_context)
+                        # Check for special tokens
+                        if token_id == self.eos_token_id:
+                            # End of sequence
+                            if text_tokens:
+                                try:
+                                    decoded_text = self.tokenizer.decode(text_tokens, skip_special_tokens=True)
+                                    if decoded_text.strip():  # Only add non-empty text
+                                        output_list.append(decoded_text.strip())
+                                except Exception as e:
+                                    logger.warning(f"Error decoding text tokens: {e}")
+                            return output_list
                         
-                        # Generate image
-                        logger.info(f"Generating image for block {block_idx + 1}")
-                        try:
-                            image = self.gen_image(
-                                image_shape,
-                                gen_context,
-                                cfg_text_precontext=cfg_text_context,
-                                cfg_img_precontext=cfg_img_context,
-                                cfg_text_scale=cfg_text_scale,
-                                cfg_img_scale=cfg_img_scale,
-                                cfg_interval=cfg_interval,
-                                timestep_shift=timestep_shift,
-                                num_timesteps=num_timesteps,
-                                cfg_renorm_min=cfg_renorm_min,
-                                cfg_renorm_type=cfg_renorm_type,
+                        elif token_id == self.vision_start_token_id:
+                            # Switch to image generation
+                            # First, decode and save any accumulated text
+                            if text_tokens:
+                                try:
+                                    decoded_text = self.tokenizer.decode(text_tokens, skip_special_tokens=True)
+                                    if decoded_text.strip():  # Only add non-empty text
+                                        output_list.append(decoded_text.strip())
+                                except Exception as e:
+                                    logger.warning(f"Error decoding text tokens: {e}")
+                                    continue
+                                # Update main context with the generated text
+                                if 'decoded_text' in locals() and decoded_text.strip():
+                                    gen_context = self.update_context_text(decoded_text, gen_context)
+                                    cfg_img_context = self.update_context_text(decoded_text, cfg_img_context)
+                            
+                            # Add vision start token to context
+                            vision_start_text = self.tokenizer.decode([token_id])
+                            gen_context = self.update_context_text(vision_start_text, gen_context)
+                            cfg_img_context = self.update_context_text(vision_start_text, cfg_img_context)
+                            cfg_text_context = deepcopy(gen_context)
+                            
+                            # Generate image
+                            logger.info(f"Generating image for block {block_idx + 1}")
+                            try:
+                                image = self.gen_image(
+                                    image_shape,
+                                    gen_context,
+                                    cfg_text_precontext=cfg_text_context,
+                                    cfg_img_precontext=cfg_img_context,
+                                    cfg_text_scale=cfg_text_scale,
+                                    cfg_img_scale=cfg_img_scale,
+                                    cfg_interval=cfg_interval,
+                                    timestep_shift=timestep_shift,
+                                    num_timesteps=num_timesteps,
+                                    cfg_renorm_min=cfg_renorm_min,
+                                    cfg_renorm_type=cfg_renorm_type,
+                                )
+                                output_list.append(image)
+                                logger.info(f"Successfully generated image {len([o for o in output_list if isinstance(o, Image.Image)])}")
+                            except Exception as e:
+                                logger.error(f"Error generating image: {e}")
+                                raise RuntimeError(f"Image generation failed: {e}") from e
+                            
+                            # Update context with generated image for future generation
+                            gen_context = self.update_context_image(
+                                image, 
+                                gen_context, 
+                                vae=True,
+                                vit=False  # Only VAE for generation context
                             )
-                            output_list.append(image)
-                            logger.info(f"Successfully generated image {len([o for o in output_list if isinstance(o, Image.Image)])}")
-                        except Exception as e:
-                            logger.error(f"Error generating image: {e}")
-                            raise RuntimeError(f"Image generation failed: {e}") from e
+                            cfg_text_context = deepcopy(gen_context)
+                            
+                            # Add vision end token
+                            vision_end_text = self.tokenizer.decode([self.vision_end_token_id])
+                            gen_context = self.update_context_text(vision_end_text, gen_context)
+                            cfg_img_context = self.update_context_text(vision_end_text, cfg_img_context)
+                            
+                            break  # Start new text generation block
                         
-                        # Update context with generated image for future generation
-                        gen_context = self.update_context_image(
-                            image, 
-                            gen_context, 
-                            vae=True,
-                            vit=False  # Only VAE for generation context
-                        )
-                        cfg_text_context = deepcopy(gen_context)
-                        
-                        # Add vision end token
-                        vision_end_text = self.tokenizer.decode([self.vision_end_token_id])
-                        gen_context = self.update_context_text(vision_end_text, gen_context)
-                        cfg_img_context = self.update_context_text(vision_end_text, cfg_img_context)
-                        
-                        break  # Start new text generation block
+                        else:
+                            # Regular text token
+                            text_tokens.append(token_id)
+                            # Note: current_gen_context is already updated by _generate_next_token
                     
-                    else:
-                        # Regular text token
-                        text_tokens.append(token_id)
-                        # Update current context for next token generation
-                        token_text = self.tokenizer.decode([token_id])
-                        current_gen_context = self.update_context_text(token_text, current_gen_context)
-                
                     # If we accumulated text tokens without hitting special tokens
-                    if text_tokens and block_idx == max_interleaved_blocks - 1:
-                        decoded_text = self.tokenizer.decode(text_tokens)
-                        output_list.append(decoded_text)
-                        break
+                    if text_tokens:
+                        try:
+                            decoded_text = self.tokenizer.decode(text_tokens, skip_special_tokens=True)
+                            if decoded_text.strip():
+                                # Update main context with accumulated tokens
+                                gen_context = self.update_context_text(decoded_text, gen_context)
+                                if block_idx == max_interleaved_blocks - 1:
+                                    output_list.append(decoded_text.strip())
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Error decoding final text tokens: {e}")
+                            break
                         
                 except Exception as e:
                     logger.error(f"Error in generation block {block_idx}: {e}")
@@ -219,12 +235,12 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
         gen_context: Dict,
         do_sample: bool = False,
         temperature: float = 1.0
-    ) -> Optional[torch.Tensor]:
+    ) -> tuple[Optional[torch.Tensor], Dict]:
         """
         Generate a single next token given the current context.
         
         Returns:
-            Next token tensor or None if generation should stop
+            Tuple of (next_token, updated_gen_context) or (None, gen_context) if generation should stop
             
         Raises:
             RuntimeError: If generation fails
@@ -236,10 +252,26 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
         kv_lens = gen_context['kv_lens']
         ropes = gen_context['ropes']
         
-        # Prepare generation input
-        generation_input = self.model.prepare_start_tokens(kv_lens, ropes, self.new_token_ids)
+        logger.debug(f"_generate_next_token: kv_lens={kv_lens}, type={type(kv_lens)}")
+        logger.debug(f"_generate_next_token: ropes={ropes}, type={type(ropes)}")
         
-        # Move tensors to device
+        # Prepare generation input
+        try:
+            generation_input = self.model.prepare_start_tokens(kv_lens, ropes, self.new_token_ids)
+        except Exception as e:
+            logger.error(f"Error in prepare_start_tokens: {e}")
+            logger.error(f"kv_lens: {kv_lens}, type: {type(kv_lens)}")
+            logger.error(f"ropes: {ropes}, type: {type(ropes)}")
+            logger.error(f"new_token_ids: {self.new_token_ids}")
+            if isinstance(kv_lens, list) and len(kv_lens) > 0:
+                logger.error(f"kv_lens[0]: {kv_lens[0]}, type: {type(kv_lens[0])}")
+            if isinstance(ropes, list) and len(ropes) > 0:
+                logger.error(f"ropes[0]: {ropes[0]}, type: {type(ropes[0])}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
+        
+        # Move tensors to device - use inherited device property
         generation_input = {
             key: tensor.to(device=self.device, dtype=self.dtype if tensor.dtype.is_floating_point else tensor.dtype)
             for key, tensor in generation_input.items()
@@ -249,14 +281,34 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
         packed_text_embedding = self.model.language_model.model.embed_tokens(generation_input['packed_start_tokens'])
         query_lens = torch.ones_like(generation_input['packed_start_tokens'])
         
-        packed_query_indexes = torch.cumsum(kv_lens, dim=0) + torch.arange(
-            0, len(kv_lens), 
-            device=kv_lens[0].device if isinstance(kv_lens[0], torch.Tensor) else self.device,
+        # Convert kv_lens to tensor if it's a list - use inherited device
+        if isinstance(kv_lens, list):
+            if len(kv_lens) == 1 and isinstance(kv_lens[0], int):
+                # Single element list with integer
+                kv_lens_tensor = torch.tensor(kv_lens, device=self.device, dtype=torch.int32)
+            else:
+                kv_lens_tensor = torch.tensor(kv_lens, device=self.device, dtype=torch.int32)
+        else:
+            kv_lens_tensor = kv_lens
+        
+        packed_query_indexes = torch.cumsum(kv_lens_tensor, dim=0) + torch.arange(
+            0, len(kv_lens) if isinstance(kv_lens, list) else kv_lens.shape[0], 
+            device=self.device,
             dtype=torch.int32
         )
         
         # Prepare key-value indexes
-        uppacked = list(generation_input['packed_key_value_indexes'].split(kv_lens[0].tolist(), dim=0))
+        try:
+            if isinstance(kv_lens, list):
+                kv_len_value = kv_lens[0] if isinstance(kv_lens[0], int) else kv_lens[0].item()
+            else:
+                kv_len_value = kv_lens[0].item()
+            uppacked = list(generation_input['packed_key_value_indexes'].split(kv_len_value, dim=0))
+        except Exception as e:
+            logger.error(f"Error preparing key-value indexes: {e}")
+            logger.error(f"kv_lens: {kv_lens}, type: {type(kv_lens)}")
+            logger.error(f"generation_input keys: {generation_input.keys()}")
+            raise
         for i in range(len(uppacked)):
             uppacked[i] = uppacked[i] + i
         packed_key_value_indexes = torch.cat(uppacked, dim=0)
@@ -272,9 +324,9 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
             packed_query_position_ids=generation_input['packed_query_position_ids'],
             packed_query_indexes=packed_query_indexes,
             past_key_values=past_key_values,
-            key_values_lens=kv_lens[0],
+            key_values_lens=kv_lens_tensor,
             packed_key_value_indexes=packed_key_value_indexes,
-            update_past_key_values=False,  # Don't update yet
+            update_past_key_values=True,  # Fix: Update KV cache after each token
             is_causal=True,
             **extra_inputs,
         )
@@ -287,5 +339,12 @@ The planning process is enclosed within <think> </think> tags, i.e. <think> plan
             next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
         else:
             next_token = torch.argmax(pred_logits, dim=-1)
-            
-        return next_token
+        
+        # Update the generation context with new KV cache state
+        # The forward_inference call with update_past_key_values=True already updated past_key_values
+        # We need to update kv_lens and ropes to reflect the new token
+        updated_gen_context = gen_context.copy()
+        updated_gen_context['kv_lens'] = [kv_lens[0] + 1] if isinstance(kv_lens, list) else [kv_lens.item() + 1]
+        updated_gen_context['ropes'] = [ropes[0] + 1] if isinstance(ropes, list) else [ropes.item() + 1]
+        
+        return next_token, updated_gen_context
