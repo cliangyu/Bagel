@@ -35,6 +35,12 @@ from train.fsdp_utils import (
     FSDPCheckpoint, FSDPConfig, grad_checkpoint_check_fn, fsdp_wrapper, 
     fsdp_ema_setup, fsdp_ema_update,
 )
+# FSDP2 support
+try:
+    from train.fsdp2_utils import get_fsdp_v2_policy, shard_model_fsdp_v2, load_checkpoint_fsdp_v2
+    FSDP2_AVAILABLE = True
+except ImportError:
+    FSDP2_AVAILABLE = False
 
 
 @dataclass
@@ -479,12 +485,38 @@ def main():
         num_replicate=training_args.num_replicate,
         num_shard=training_args.num_shard,
     )
-    ema_model = deepcopy(model)
-    model, ema_model = FSDPCheckpoint.try_load_ckpt(
-        resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
-    )
-    ema_model = fsdp_ema_setup(ema_model, fsdp_config)
-    fsdp_model = fsdp_wrapper(model, fsdp_config)
+    # Check if FSDP2 is requested via environment variable
+    use_fsdp_v2 = os.environ.get('USE_FSDP_V2', '0') == '1'
+    
+    if use_fsdp_v2 and FSDP2_AVAILABLE:
+        logger.info("🚀 Using FSDP v2 for model sharding")
+        logger.info(f"FSDP2_AVAILABLE: {FSDP2_AVAILABLE}")
+        logger.info(f"USE_FSDP_V2: {os.environ.get('USE_FSDP_V2', 'not set')}")
+        # For FSDP2, create the model with proper parameters
+        bagel_init_params = {
+            "language_model": model.language_model,
+            "vit_model": model.vit_model if hasattr(model, 'vit_model') else None,
+            "config": model.config
+        }
+        fsdp_model = shard_model_fsdp_v2(
+            model_cls=Bagel,
+            bagel_init_params=bagel_init_params,
+            fsdp_config=fsdp_config,
+            cpu_offload=training_args.cpu_offload
+        )
+        logger.info("✅ FSDP v2 model sharding completed")
+        # Load checkpoint after sharding for FSDP2 using distributed checkpoint API
+        fsdp_model = load_checkpoint_fsdp_v2(fsdp_model, resume_from, logger)
+        # Skip EMA for now with FSDP2 to simplify testing
+        ema_model = None
+    else:
+        logger.info(f"Using FSDP v1 for model sharding (USE_FSDP_V2={use_fsdp_v2}, AVAILABLE={FSDP2_AVAILABLE})")
+        ema_model = deepcopy(model)
+        model, ema_model = FSDPCheckpoint.try_load_ckpt(
+            resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
+        )
+        ema_model = fsdp_ema_setup(ema_model, fsdp_config)
+        fsdp_model = fsdp_wrapper(model, fsdp_config)
     apply_activation_checkpointing(
         fsdp_model, 
         checkpoint_wrapper_fn=functools.partial(
@@ -574,7 +606,8 @@ def main():
     if training_args.visual_gen:
         vae_model.to(device).eval()
     fsdp_model.train()
-    ema_model.eval()
+    if ema_model is not None:
+        ema_model.eval()
 
     # train loop
     start_time = time()
@@ -625,7 +658,8 @@ def main():
         total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
         optimizer.step()
         scheduler.step()
-        fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
+        if ema_model is not None:
+            fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
 
         # Log loss values:
         if curr_step % training_args.log_every == 0:
