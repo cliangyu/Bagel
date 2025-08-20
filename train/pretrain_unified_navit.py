@@ -37,7 +37,11 @@ from train.fsdp_utils import (
 )
 # FSDP2 support
 try:
-    from train.fsdp2_utils import get_fsdp_v2_policy, shard_model_fsdp_v2, load_checkpoint_fsdp_v2
+    from train.fsdp2_utils import (
+        get_fsdp_v2_policy, shard_model_fsdp_v2, load_checkpoint_fsdp_v2,
+        save_checkpoint_fsdp_v2, load_model_and_optimizer_fsdp_v2, 
+        fsdp2_ema_setup, fsdp2_ema_update
+    )
     FSDP2_AVAILABLE = True
 except ImportError:
     FSDP2_AVAILABLE = False
@@ -317,6 +321,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Enable FSDP parameter offload to CPU."}
     )
+    use_fsdp_v2: bool = field(
+        default=False,
+        metadata={"help": "Use FSDP v2 (composable FSDP with DTensor) instead of FSDP v1. Can also be controlled via USE_FSDP_V2 env var."}
+    )
 
     # --- module freezing ---
     freeze_llm: bool = field(
@@ -485,32 +493,49 @@ def main():
         num_replicate=training_args.num_replicate,
         num_shard=training_args.num_shard,
     )
-    # Check if FSDP2 is requested via environment variable
-    use_fsdp_v2 = os.environ.get('USE_FSDP_V2', '0') == '1'
+    # Determine FSDP version: config flag takes precedence over env var
+    use_fsdp_v2 = training_args.use_fsdp_v2 or os.environ.get('USE_FSDP_V2', '0') == '1'
     
     if use_fsdp_v2 and FSDP2_AVAILABLE:
-        logger.info("🚀 Using FSDP v2 for model sharding")
+        logger.info("🚀 Using FSDP v2 (composable) for model sharding")
         logger.info(f"FSDP2_AVAILABLE: {FSDP2_AVAILABLE}")
-        logger.info(f"USE_FSDP_V2: {os.environ.get('USE_FSDP_V2', 'not set')}")
+        logger.info(f"Config use_fsdp_v2: {training_args.use_fsdp_v2}")
+        logger.info(f"Env USE_FSDP_V2: {os.environ.get('USE_FSDP_V2', 'not set')}")
+        
         # For FSDP2, create the model with proper parameters
         bagel_init_params = {
             "language_model": model.language_model,
             "vit_model": model.vit_model if hasattr(model, 'vit_model') else None,
             "config": model.config
         }
+        
+        # Create main FSDP2 model
         fsdp_model = shard_model_fsdp_v2(
             model_cls=Bagel,
             bagel_init_params=bagel_init_params,
             fsdp_config=fsdp_config,
             cpu_offload=training_args.cpu_offload
         )
-        logger.info("✅ FSDP v2 model sharding completed")
-        # Load checkpoint after sharding for FSDP2 using distributed checkpoint API
-        fsdp_model = load_checkpoint_fsdp_v2(fsdp_model, resume_from, logger)
-        # Skip EMA for now with FSDP2 to simplify testing
-        ema_model = None
+        logger.info("✅ FSDP v2 main model sharding completed")
+        
+        # Setup parameter-level EMA (no separate EMA model for FSDP2)
+        # This stores EMA values as parameter attributes on the main model
+        fsdp2_ema_setup(fsdp_model)
+        ema_model = None  # No separate EMA model in FSDP2
+        logger.info("✅ FSDP v2 parameter-level EMA setup completed")
+        
+        # Load model checkpoints for FSDP2 (if resuming model-only)
+        if resume_model_only and resume_from:
+            fsdp_model = load_checkpoint_fsdp_v2(fsdp_model, resume_from, logger, model_type="model")
+            if ema_model is not None:
+                ema_model = load_checkpoint_fsdp_v2(ema_model, resume_from, logger, model_type="ema")
+            logger.info("✅ FSDP v2 model-only checkpoint loading completed")
+        
     else:
-        logger.info(f"Using FSDP v1 for model sharding (USE_FSDP_V2={use_fsdp_v2}, AVAILABLE={FSDP2_AVAILABLE})")
+        logger.info(f"Using FSDP v1 (traditional) for model sharding")
+        logger.info(f"FSDP2 requested: {use_fsdp_v2}, available: {FSDP2_AVAILABLE}")
+        
+        # Traditional FSDP1 path
         ema_model = deepcopy(model)
         model, ema_model = FSDPCheckpoint.try_load_ckpt(
             resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
@@ -655,11 +680,14 @@ def main():
 
         optimizer.zero_grad()
         loss.backward()
-        total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
+        total_norm = torch.nn.utils.clip_grad_norm_(fsdp_model.parameters(), training_args.max_grad_norm)
         optimizer.step()
         scheduler.step()
         if ema_model is not None:
-            fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
+            if use_fsdp_v2 and FSDP2_AVAILABLE:
+                fsdp2_ema_update(ema_model, fsdp_model, decay=training_args.ema)
+            else:
+                fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
 
         # Log loss values:
         if curr_step % training_args.log_every == 0:
