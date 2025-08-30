@@ -9,9 +9,9 @@
 # 4. Train on both gen and und tasks
 
 # Environment setup
-export PATH=/home/leonlc/.conda/envs/bagel/bin:$PATH
+export PATH=/home/leonlc/.conda/envs/grpo/bin:$PATH
 export PYTHONPATH=/data/users/leonlc/fsdp_bagel/Bagel:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES=1,2,3,4
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 
 # Variables (following official script structure)
 num_nodes=1
@@ -27,7 +27,10 @@ vit_path="hf/siglip-so400m-14-980-flash-attn2-navit"
 
 # For finetuning from existing model
 model_path="/data/users/leonlc/BAGEL-7B-MoT"
-resume_from="${model_path}"
+# Resume from specific checkpoint
+# resume_from="/data/users/leonlc/bagel_output/aligned_20250829_103553/checkpoints/0000006"
+resume_from="/data/users/leonlc/bagel_output/aligned_20250830_083509/hf_0000006_final/"
+# resume_from={model_path}
 
 # Output paths
 output_path="/data/users/leonlc/bagel_output/aligned_$(date +%Y%m%d_%H%M%S)"
@@ -42,6 +45,7 @@ echo "Using ${nproc_per_node} GPUs: ${CUDA_VISIBLE_DEVICES}"
 echo "Output: ${output_path}"
 
 # Run training (aligned with official script structure)
+# --finetune_from_hf True always True
 torchrun \
   --nnodes=${num_nodes} \
   --node_rank=${node_rank} \
@@ -58,7 +62,7 @@ torchrun \
   --use_flex True \
   --resume_from ${resume_from} \
   --finetune_from_hf True \
-  --finetune_from_ema True \
+  --finetune_from_ema False \
   --resume_model_only True \
   --auto_resume True \
   --results_dir ${output_path} \
