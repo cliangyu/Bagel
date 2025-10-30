@@ -4,9 +4,10 @@
 1. [What is Diffusion Forcing?](#what-is-diffusion-forcing)
 2. [Why is Diffusion Forcing Needed?](#why-is-diffusion-forcing-needed)
 3. [BAGEL's Implementation](#bagels-implementation)
-4. [Concrete Examples](#concrete-examples)
-5. [Code Walkthrough](#code-walkthrough)
-6. [Comparison with Other Approaches](#comparison-with-other-approaches)
+4. [Where Do `split_start` and `split_end` Come From?](#where-do-split_start-and-split_end-come-from)
+5. [Concrete Examples](#concrete-examples)
+6. [Code Walkthrough](#code-walkthrough)
+7. [Comparison with Other Approaches](#comparison-with-other-approaches)
 
 ---
 
@@ -103,28 +104,49 @@ BAGEL implements a **modified version** of diffusion forcing that balances flexi
 
 ### Core Mechanism: `split_start` and `split_end`
 
-Instead of per-frame noise, BAGEL uses **per-sequence-segment noise**:
+**📖 For complete details on split_start/split_end, see [SPLIT_START_END_EXPLAINED.md](SPLIT_START_END_EXPLAINED.md)**
 
+Instead of per-frame noise, BAGEL uses **per-sequence-segment noise**. The `split_start` flag controls **three critical aspects**:
+
+#### 1. Segment Boundaries
 ```python
 # From dataset_base.py:317-319
 split_start = item.get('split_start', True)
 if split_start:
-    curr_split_len = 0  # Start a new segment
+    curr_split_len = 0  # Start a new attention segment
 ```
 
+#### 2. Timestep Assignment (Diffusion Forcing)
 ```python
 # From dataset_base.py:428-431
 if item['loss'] == 1:  # This is a noised VAE token
     if split_start:  # NEW SEGMENT → NEW NOISE LEVEL
-        timestep = np.random.randn()
+        timestep = np.random.randn()  # Sample new t ~ N(0,1)
+    # else: reuse previous timestep (same segment)
 else:  # This is a clean VAE token
     timestep = float('-inf')  # Always t=0
 ```
 
+#### 3. Attention Mode
+```python
+# From dataset_base.py:449-453
+if split_start:
+    if item['loss'] == 1 and 'frame_delta' not in item.keys():
+        attn_modes.append("noise")  # Image editing: hidden from future
+    else:
+        attn_modes.append("full")   # Video: visible to all
+```
+
 **Key Points:**
-- `split_start=True`: Assigns a **new random noise level** `t ~ N(0,1)`
-- `split_start=False`: **Reuses** the previous noise level
-- All frames between `split_start` and `split_end` share the same `t`
+- `split_start=True`:
+  - ✅ Starts a **new attention segment**
+  - ✅ Assigns a **new random noise level** `t ~ N(0,1)` for noised VAE
+  - ✅ Determines **attention mode** ("noise" vs "full")
+- `split_start=False`:
+  - ♻️ Continues previous segment
+  - ♻️ **Reuses** the previous noise level
+  - ⏭️ No attention mode set (inherits from segment start)
+- All frames between `split_start` and `split_end` share the same `t` and attention segment
 
 ### Temporal Information: `frame_delta`
 
@@ -149,27 +171,162 @@ RoPE positions: [0, 5, 10, 15]
 
 ### Attention Masking for Noised Tokens
 
-When `split_start=True` and the token is noised, special attention rules apply:
+When `split_start=True` and the token is noised, the attention mode depends on whether it's an image edit or video frame:
 
 ```python
 # From dataset_base.py:450-453
 if split_start:
     if item['loss'] == 1 and 'frame_delta' not in item.keys():
-        attn_modes.append("noise")  # Invisible to future tokens
+        attn_modes.append("noise")  # IMAGE EDITING: Invisible to future tokens
     else:
-        attn_modes.append("full")   # Normal full attention
+        attn_modes.append("full")   # VIDEO: Normal full attention
 ```
 
-**"noise" mode** (from data_utils.py:93-97):
+**Why the distinction?**
+- **Image editing:** Noised VAE is the **generation target** - future context shouldn't "peek" at it
+- **Video frames:** Noised frames are **temporal context** - future frames should see them (with frame_delta)
+
+**"noise" mode implementation** (from data_utils.py:96-98):
 ```python
 if attn_mode == "noise":
-    # Block all future tokens from attending TO this noised token
+    # Block all tokens from attending TO this noised segment
     attention_mask[:, csum : csum + s] = torch.zeros((sample_len, s))
-    # But the noised token CAN attend to itself
+    # But the noised segment CAN attend to itself
     attention_mask[csum : csum + s, csum : csum + s] = torch.ones((s, s))
 ```
 
-**Result:** Noised VAE tokens are invisible to future context (prevents information leakage).
+**Result:** Noised VAE tokens in image editing are **isolated islands** - they can attend to themselves and past context, but no other tokens can attend to them (prevents information leakage during training).
+
+---
+
+## Where Do `split_start` and `split_end` Come From?
+
+### Origin: Dataset Classes Set These Flags
+
+The `split_start` and `split_end` flags are set **at data loading time** by dataset classes. They are **not computed by any algorithm** - they're structural decisions made by each dataset type.
+
+### Default Behavior: Independent Segments
+
+The key insight is in `dataset_base.py:317`:
+
+```python
+split_start = item.get('split_start', True)  # ← Defaults to True!
+```
+
+**If a dataset class doesn't set these flags, both default to `True`**, meaning:
+- Every element starts its own segment
+- Every element ends its own segment
+- Every noised VAE gets independent noise (diffusion forcing)
+
+### Strategy 1: Let Defaults Apply (Most Datasets)
+
+Most dataset classes **don't set** `split_start`/`split_end`:
+
+**Examples:**
+- Text-to-image dataset (`data/t2i_dataset.py`)
+- Image editing dataset (`data/interleave_datasets/edit_dataset.py`)
+- VLM dataset (`data/vlm_dataset.py`)
+
+**Implementation:** They use helper methods like `_add_image()` and `_add_text()` which **don't set** these flags:
+
+```python
+# From interleave_t2i_dataset.py:35-47
+def _add_image(self, data, image, need_loss, need_vae, need_vit, enable_cfg=True):
+    if need_loss:
+        data['sequence_plan'].append({
+            'type': 'vae_image',
+            'enable_cfg': 0,
+            'loss': 1,
+            # ← NO split_start or split_end set → defaults to True
+        })
+    # ... similar for need_vae and need_vit
+```
+
+**Result:** Each image becomes its own independent segment with its own noise level.
+
+**Example from editing:**
+```python
+# Original image
+data = self._add_image(data, original_image, need_loss=False, need_vae=True, need_vit=True)
+# → Creates 2 elements, both default to split_start=True, split_end=True
+
+# Instruction
+data = self._add_text(data, instruction, need_loss=False)
+# → Creates 1 element, defaults to split_start=True, split_end=True
+
+# Edited image
+data = self._add_image(data, edited_image, need_loss=True, need_vae=True, need_vit=True)
+# → Creates 3 elements, all default to split_start=True, split_end=True
+```
+
+**Segments created:**
+```
+Seg 1: [Clean VAE]     → t = -inf
+Seg 2: [ViT tokens]    → no timestep
+Seg 3: [Text]          → no timestep
+Seg 4: [Noised VAE]    → t = 0.42 (NEW)
+Seg 5: [Clean VAE]     → t = -inf
+Seg 6: [ViT tokens]    → no timestep
+```
+
+Each noised VAE has **independent noise** → diffusion forcing for multi-step editing.
+
+---
+
+### Strategy 2: Explicitly Set to Group (Video Only)
+
+**Only video sequences** explicitly set these flags to group frames together.
+
+**Implementation:** The `_add_video()` method in `interleave_t2i_dataset.py:88-129`:
+
+```python
+def _add_video(self, data, frames, frame_indexes, need_loss, need_vae, enable_cfg=True):
+    for idx, (image, frame_idx) in enumerate(zip(frames, frame_indexes)):
+        current_sequence_plan = {
+            'type': 'vae_image',
+            'loss': 1 if need_loss else 0,
+            'split_start': idx == 0,              # ← TRUE only for FIRST frame
+            'split_end': idx == len(frames) - 1,  # ← TRUE only for LAST frame
+            'frame_delta': frame_indexes[idx + 1] - frame_idx  # Temporal info
+        }
+        data['sequence_plan'].append(current_sequence_plan)
+```
+
+**Result:** All frames in a video clip share **one segment** and **one noise level**.
+
+**Example:**
+```python
+frames = [frame0, frame1, frame2, frame3]
+frame_indexes = [0, 5, 10, 15]
+
+# Creates:
+Frame 0: split_start=True,  split_end=False  # Start segment
+Frame 1: split_start=False, split_end=False  # Continue segment
+Frame 2: split_start=False, split_end=False  # Continue segment
+Frame 3: split_start=False, split_end=True   # End segment
+```
+
+**Segments created:**
+```
+Seg 1: [Frame 0, Frame 1, Frame 2, Frame 3]  → All share t = -0.73
+```
+
+All frames **share noise** → temporal consistency.
+
+---
+
+### Summary: How Segments Are Decided
+
+| Dataset Type | Sets split_start/end? | Strategy | Noise Assignment | Rationale |
+|--------------|----------------------|----------|------------------|-----------|
+| **T2I** | ❌ No | Independent | One `t` per image | Simple generation |
+| **Editing** | ❌ No | Independent | One `t` per edit | Prevent error accumulation |
+| **VLM SFT** | ❌ No | Independent | One `t` per image | Understanding task |
+| **Video** | ✅ Yes | Grouped | One `t` per clip | Temporal consistency |
+
+**Key Insight:** Segments are determined by **structural design decisions**, not algorithmic grouping. The default behavior (independent segments) supports diffusion forcing, while videos explicitly override this for temporal coherence.
+
+**Note:** The `split_integer_exp_decay()` function in `data/data_utils.py:106-115` exists for random grouping but is **not actively used** in the current codebase.
 
 ---
 
