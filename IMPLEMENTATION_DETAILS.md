@@ -172,34 +172,57 @@ ViT₁              | Text₁, Clean VAE₀, ViT₀, Text₂, Text₃, Clean VAE
 
 ## Diffusion Forcing: Independent Noise Levels per Image
 
+**📖 For comprehensive coverage of diffusion forcing, see [DIFFUSION_FORCING_GUIDE.md](DIFFUSION_FORCING_GUIDE.md)**
+
 **Paper Description:**
 > For interleaved multi-image generation, we adopt the diffusion forcing strategy, which adds independent noise levels to different images and conditions each image on noisy representations of preceding images.
 
-### Implementation
+### What is Diffusion Forcing?
 
-**File:** `data/dataset_base.py` (lines 428-429)
+Diffusion forcing trains sequence models by assigning **independent noise levels** to different elements, enabling:
+- ✅ **Autoregressive generation** (denoise next frame conditioned on noisy context)
+- ✅ **No error accumulation** (context frames are properly noised, not generated-then-reused)
+- ✅ **Arbitrary sequence lengths** (not limited to training length)
+- ✅ **Multi-step editing chains** (each edit has independent noise level)
+
+### BAGEL's Implementation: Segment-Level Noise
+
+BAGEL uses **segment-level diffusion forcing** rather than per-frame noise:
+- Each segment gets ONE random noise level (at `split_start=True`)
+- Frames within a segment share the same noise level
+- Different segments get independent noise levels
+
+**File:** `data/dataset_base.py` (lines 428-431)
 
 ```python
-if split_start:
-    timestep = np.random.randn()  # NEW independent noise level
+if item['loss'] == 1:  # Noised VAE token
+    if split_start:
+        timestep = np.random.randn()  # NEW independent noise level for this segment
+    # else: reuse previous timestep (same segment)
 else:
-    timestep = <same as previous>  # Same noise level within group
+    timestep = float('-inf')  # t=0 marker for clean tokens
 ```
 
-**Example: Three consecutive images in a video**
+### Example: Three consecutive images in a video
 
 ```python
-# Image 1
-{'type': 'vae_image', 'loss': 1, 'split_start': True,  'split_end': False}  # t₁ = 0.73
-# Image 2
-{'type': 'vae_image', 'loss': 1, 'split_start': False, 'split_end': False}  # t₂ = 0.73 (same group)
-# Image 3
-{'type': 'vae_image', 'loss': 1, 'split_start': True,  'split_end': True}   # t₃ = -0.42 (new noise)
+# Image 1 - Start of Segment 1
+{'type': 'vae_image', 'loss': 1, 'split_start': True,  'split_end': False}  # t₁ = 0.73 (NEW)
+# Image 2 - Continues Segment 1
+{'type': 'vae_image', 'loss': 1, 'split_start': False, 'split_end': False}  # t₂ = 0.73 (SAME)
+# Image 3 - Start of Segment 2
+{'type': 'vae_image', 'loss': 1, 'split_start': True,  'split_end': True}   # t₃ = -0.42 (NEW)
 ```
 
 **Result:**
-- Images 1-2: Same noise level t=0.73 (grouped)
-- Image 3: Different noise level t=-0.42 (diffusion forcing)
+- Images 1-2: Same segment, same noise level t=0.73 (temporal consistency)
+- Image 3: New segment, different noise level t=-0.42 (diffusion forcing)
+
+**Why segment-level?**
+- ⚡ Efficient batching of related frames
+- 🎯 Temporal consistency within short sequences
+- 🔄 Still enables multi-step autoregressive generation
+- ⚖️ Balances flexibility and efficiency
 
 ---
 
