@@ -9,3 +9,44 @@ tests
 .DS_Store
 gradio.sh
 data_example
+
+# Data directories (use external bagel-data/ instead)
+data_samples/
+outputs/
+datasets/
+test_images/
+
+# Data files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.mp4
+*.avi
+*.mov
+*.parquet
+*.jsonl
+*.arrow
+*.h5
+*.hdf5
+
+# User-specific configs and scripts
+.env
+*_h100.sh
+train_aligned_h100.sh
+prepare_datasets.py
+
+# Training artifacts
+checkpoints/
+wandb/
+
+# Model weights (too large for git)
+models/
+hf/
+flux/
+
+# Temporary files
+*.tmp
+*.swp
+*~

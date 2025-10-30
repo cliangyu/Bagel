@@ -152,18 +152,44 @@ python app.py  --mode 3
 
 ## 🔥 Train & Eval
 
+### Setup
+
+Before training, configure your environment:
+```bash
+# 1. Copy environment template
+cp scripts/setup/example.env .env
+
+# 2. Edit .env with your paths
+# 3. Source the environment
+source .env
+```
+
+See [Setup Guide](scripts/setup/README.md) for detailed instructions.
+
 ### Train
 
 ```bash
 bash scripts/train.sh
 ```
 
-You can replace the variables in the script with your own before running. 
-See [TRAIN](TRAIN.md) for more details.
+You can replace the variables in the script with your own before running.
+See [TRAIN](docs/training/TRAIN.md) for more details.
 
 ### Eval
-We provide the scripts for evaluating VLM, T2I and Editing benchmarks. 
-Please See [EVAL](EVAL.md) for more details.
+We provide the scripts for evaluating VLM, T2I and Editing benchmarks.
+Please See [EVAL](docs/evaluation/EVAL.md) for more details.
+
+## 📚 Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
+
+- **Training:** [Training guides](docs/training/) including checkpoint conversion and diffusion forcing
+- **Evaluation:** [Evaluation benchmarks](docs/evaluation/) and metrics
+- **Inference:** [Inference guides](docs/inference/) and parameter explanations
+- **Architecture:** [Implementation details](docs/architecture/) and technical analysis
+- **Data:** [Dataset types](docs/data/) and format reference
+
+See the [documentation index](docs/README.md) for a complete overview.
 
 
 ## 📊 Benchmarks
